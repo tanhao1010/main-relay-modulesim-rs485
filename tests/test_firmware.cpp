@@ -46,16 +46,47 @@ int main() {
   handleSim();
   assert(relayOn[0]);
 
-  // 4. Test Modbus RTU RS485
-  // Doc 4 thanh ghi tu dia chi 0 (01 03 00 00 00 04 44 09)
+  // 4. Test logic moi: R1/R2 set ON -> MAN, set OFF -> AUTO, R3 doc lap
+  handleCommand("AUTO", reply, sizeof(reply));
+  assert(settings.autoMode);
+
+  // Set R1 ON -> tu dong chuyen MAN
+  handleCommand("R1 ON", reply, sizeof(reply));
+  assert(!settings.autoMode && relayOn[0]);
+
+  // Set R3 ON/OFF -> khong anh huong che do
+  handleCommand("R3 ON", reply, sizeof(reply));
+  assert(!settings.autoMode && relayOn[2]);
+
+  // Xoa moc 1 cua R1 de khi ve AUTO khong bi gio 10:16 de len
+  handleCommand("R1 DEL1", reply, sizeof(reply));
+  // Set R1 OFF -> tu dong ve AUTO lai
+  handleCommand("R1 OFF", reply, sizeof(reply));
+  assert(settings.autoMode && !relayOn[0]);
+
+  // Dang AUTO, set R3 ON -> van giu AUTO
+  handleCommand("R3 ON", reply, sizeof(reply));
+  assert(settings.autoMode && relayOn[2]);
+
+  // 4b. Test khi nguoi dung chu dong dat MAN: bat/tat R1 hay R2 khong duoc tu dong ve AUTO
+  handleCommand("MAN", reply, sizeof(reply));
+  assert(!settings.autoMode);
+
+  handleCommand("R1 ON", reply, sizeof(reply));
+  assert(!settings.autoMode && relayOn[0]);
+
+  handleCommand("R1 OFF", reply, sizeof(reply));
+  assert(!settings.autoMode && !relayOn[0]); // Van o MAN, khong tu nhay sang AUTO!
+
+  // 5. Test Modbus RTU RS485 (Serial2 tren PA2/PA3)
   const uint8_t reqFc3[] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x04, 0x44, 0x09};
   for (uint8_t b : reqFc3) {
-    char s[2] = {(char)b, 0};
-    Serial3.feed(s);
+    Serial2.feedByte(b);
   }
-  fakeTimeUs += 15000; // Doi 15ms cho het khoang lang Modbus
-  handleModbus();
-  assert(Serial3.txLen > 5); // Co phan hoi tra ve!
+  handleModbus();      // Doc cac byte vao buffer
+  fakeTimeUs += 15000; // Troi qua 15ms (khoang lang giua cac khung Modbus)
+  handleModbus();      // Phat hien het khung -> xu ly va gui phan hoi
+  assert(Serial2.txLen > 5); // Co phan hoi tra ve!
 
   printf("ALL TESTS PASSED!\n");
   return 0;

@@ -37,6 +37,11 @@ struct FakeSerial : public Stream {
     memmove(rx, rx + 1, --rxLen);
     return c;
   }
+  void feedByte(uint8_t b) {
+    if (rxLen + 1 < sizeof(rx)) {
+      rx[rxLen++] = (char)b;
+    }
+  }
   void feed(const char *s) {
     size_t n = strlen(s);
     if (rxLen + n < sizeof(rx)) {

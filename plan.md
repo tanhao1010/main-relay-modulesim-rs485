@@ -5,7 +5,7 @@
 1. **Gom gọn và viết lại theo phong cách sinh viên (dễ đọc, dễ hiểu, dễ bảo vệ đồ án)**:
    - Toàn bộ chương trình đặt gọn trong 1 file duy nhất [`src/main.cpp`](src/main.cpp), chia thành các phần rõ ràng có chú thích tiếng Việt.
    - Đã loại bỏ các file phụ phức tạp trước đó (`sms_pdu.cpp`, `record_store.cpp`, `control_logic.cpp`).
-   - Giữ nguyên toàn bộ sơ đồ chân phần cứng (`RELAY1=PA7`, `RELAY2=PB0`, `RELAY3=PB1`, `ACS712=PA1`, `DS3231=PB6/PB7`, `SimSerial=PA9/PA10`, `DebugSerial=PA2/PA3`, `RS485=PB10/PB11`, `LED_ACT=PB5`).
+   - Giữ nguyên toàn bộ sơ đồ chân phần cứng (`RELAY1=PA7`, `RELAY2=PB0`, `RELAY3=PB1`, `ACS712=PA1`, `DS3231=PB6/PB7`, `SimSerial=PA9/PA10`, `DebugSerial=PB10/PB11`, `RS485=PA2/PA3`, `LED_ACT=PB5`).
 
 2. **Chạy độc lập không cần module SIM (Offline Mode)**:
    - Khi khởi động, hàm `handleSim()` gửi lệnh `AT` tối đa **3 lần** (mỗi lần cách nhau 2 giây bằng `millis()`, không dùng `delay()` làm đứng vòng lặp).
@@ -30,10 +30,20 @@
    - Đọc/ghi thời gian thực qua I2C (`0x68`) bằng hàm `decToBcd` / `bcdToDec`.
    - Nếu chưa cắm module DS3231 mà gửi lệnh `TIME ...` qua Serial hoặc ghi qua RS485, mạch tự động kích hoạt đồng hồ mềm (`useSoftRtc`) đếm mỗi giây để vẫn test được lịch hẹn `AUTO`.
 
-7. **RS485 Modbus RTU Slave (ID = 1, Baud 9600, USART3: PB10 TX, PB11 RX)**:
+7. **RS485 Modbus RTU Slave (ID = 1, Baud 9600, Chân PA2 TX, PA3 RX - USART2)**:
    - Dùng toàn bộ **Holding Registers (Function 03 đọc, Function 06/16 ghi)**.
-   - Hỗ trợ đọc & ghi thời gian DS3231 (Giờ, Phút, Giây, Ngày, Tháng, Năm), trạng thái Relay 1..3, dòng điện I, công suất P, số điện kWh và 9 mốc hẹn giờ.
-   - Mọi thay đổi khi ghi qua Modbus đều tự động lưu vào **EEPROM** và **DS3231** giống hệt như gửi lệnh qua SMS / Serial.
+   - Tự viết bộ giải mã Modbus trực tiếp, phát hiện khoảng lặng $\ge 10\text{ ms}$, chịu được độ trễ USB của Windows, không bị timeout.
+   - Tự động in log `[RS485 RX]` và `[RS485 TX]` ra cổng Debug Serial để giám sát.
+
+8. **Logic chuyển đổi AUTO / MAN chuẩn xác cho Relay 1 & 2, Relay 3 độc lập**:
+   - **Khi đang ở AUTO**:
+     + Nếu Relay 1 hoặc 2 đang tắt (mức 0) mà có lệnh bật lên 1 (`ON`) $\rightarrow$ hệ thống hiểu là bật cưỡng bức tạm thời nên **tự chuyển sang `MAN`** để giữ relay luôn bật.
+     + Khi người dùng xong việc, có lệnh tắt về 0 (`OFF`) $\rightarrow$ hệ thống **tự động trả về `AUTO` lại**.
+   - **Khi người dùng chủ động đặt `MAN`**:
+     + Bật lên 1 hay tắt về 0 **tuyệt đối không tự động chuyển chế độ** (giữ nguyên chế độ `MAN`).
+     + Chỉ chuyển sang `AUTO` khi người dùng chủ động gửi lệnh `AUTO` (hoặc Modbus ghi Reg 0 = 1).
+   - **Relay 3 (thuần MAN)**:
+     + Bật/tắt Relay 3 hoàn toàn độc lập, không bao giờ làm thay đổi chế độ `AUTO/MAN` của hệ thống.
 
 ---
 
@@ -42,9 +52,9 @@
 | Địa chỉ Reg | Tên thông số | Chức năng / Đơn vị | Quyền hạn |
 |:---:|---|---|:---:|
 | **0** | Chế độ | `0` = MAN, `1` = AUTO | Đọc / Ghi (lưu EEPROM) |
-| **1** | Relay 1 | `0` = OFF, `1` = ON | Đọc / Ghi (lưu kWh EEPROM) |
-| **2** | Relay 2 | `0` = OFF, `1` = ON | Đọc / Ghi |
-| **3** | Relay 3 | `0` = OFF, `1` = ON | Đọc / Ghi |
+| **1** | Relay 1 | `0` = OFF, `1` = ON (1 -> MAN, 0 -> AUTO) | Đọc / Ghi (lưu kWh EEPROM) |
+| **2** | Relay 2 | `0` = OFF, `1` = ON (1 -> MAN, 0 -> AUTO) | Đọc / Ghi |
+| **3** | Relay 3 | `0` = OFF, `1` = ON (Không đổi chế độ AUTO/MAN) | Đọc / Ghi |
 | **4** | Dòng điện I | Đơn vị `0.01 A` (VD: `25` = 0.25 A) | Chỉ đọc |
 | **5** | Công suất P | Đơn vị `1 W` (VD: `55` = 55 W) | Chỉ đọc |
 | **6** | Số điện E (kWh) - Cao | 16 bit cao của tổng Wh | Đọc / Ghi (lưu EEPROM) |
@@ -87,17 +97,17 @@ R3=0:0800-0900,1400-1500,2200-0600
 ### 2. Nhóm lệnh chuyển chế độ (`AUTO` / `MAN`)
 | Lệnh gửi | Chức năng |
 |---|---|
-| `AUTO` *(hoặc `SET AUTO`)* | Chuyển sang chế độ **Tự động** chạy theo lịch hẹn giờ |
-| `MAN` *(hoặc `SET MAN`)* | Chuyển sang chế độ **Bằng tay** (không tự bật/tắt theo lịch) |
+| `AUTO` *(hoặc `SET AUTO`)* | Chuyển sang chế độ **Tự động** chạy theo lịch hẹn giờ cho Relay 1 & 2 |
+| `MAN` *(hoặc `SET MAN`)* | Chuyển sang chế độ **Bằng tay** |
 
-### 3. Nhóm lệnh bật/tắt Relay bằng tay (chỉ dùng trong chế độ `MAN`)
+### 3. Nhóm lệnh bật/tắt Relay
 | Lệnh gửi | Chức năng |
 |---|---|
-| `R1 ON` *(hoặc `RELAY1 ON`)* | Bật Relay 1 |
-| `R1 OFF` *(hoặc `RELAY1 OFF`)* | Tắt Relay 1 |
-| `R2 ON` / `R2 OFF` | Bật / Tắt Relay 2 |
-| `R3 ON` / `R3 OFF` | Bật / Tắt Relay 3 |
-| `MAN;R1 ON;R2 OFF;R3 ON` | Chuyển sang `MAN`, đồng thời bật R1, tắt R2, bật R3 |
+| `R1 ON` *(hoặc `RELAY1 ON`)* | Bật Relay 1 $\rightarrow$ **tự động chuyển chế độ về `MAN`** |
+| `R1 OFF` *(hoặc `RELAY1 OFF`)* | Tắt Relay 1 $\rightarrow$ **tự động chuyển chế độ về `AUTO` lại** |
+| `R2 ON` | Bật Relay 2 $\rightarrow$ **tự động chuyển chế độ về `MAN`** |
+| `R2 OFF` | Tắt Relay 2 $\rightarrow$ **tự động chuyển chế độ về `AUTO` lại** |
+| `R3 ON` / `R3 OFF` | Bật / Tắt Relay 3 bằng tay $\rightarrow$ **hoàn toàn độc lập, không làm thay đổi chế độ `AUTO/MAN`** |
 
 ### 4. Nhóm lệnh cài đặt lịch hẹn giờ (3 Relay × 3 mốc)
 | Lệnh gửi | Chức năng |

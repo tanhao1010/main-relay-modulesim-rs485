@@ -30,10 +30,20 @@
    - Đọc/ghi thời gian thực qua I2C (`0x68`) bằng hàm `decToBcd` / `bcdToDec`.
    - Nếu chưa cắm module DS3231 mà gửi lệnh `TIME ...` qua Serial, mạch tự động kích hoạt đồng hồ mềm (`useSoftRtc`) đếm mỗi giây để vẫn test được lịch hẹn `AUTO`.
 
-7. **RS485 Modbus RTU Slave (ID = 1, Baud 9600, USART3: PB10 TX, PB11 RX)**:
-   - Dùng toàn bộ **Holding Registers (Function 03 đọc, Function 06/16 ghi)**.
-   - Hỗ trợ đọc & ghi thời gian DS3231 (Giờ, Phút, Giây, Ngày, Tháng, Năm), trạng thái Relay 1..3, dòng điện I, công suất P, số điện kWh và 9 mốc hẹn giờ.
-   - Mọi thay đổi khi ghi qua Modbus đều tự động lưu vào **EEPROM** và **DS3231** giống hệt như gửi lệnh qua SMS / Serial.
+8. **Logic chuyển đổi AUTO / MAN chuẩn xác cho Relay 1 & 2, Relay 3 độc lập**:
+   - **Khi đang ở AUTO**:
+     + Nếu Relay 1 hoặc 2 đang tắt (mức 0) mà có lệnh bật lên 1 (`ON`) $\rightarrow$ hệ thống hiểu là bật cưỡng bức tạm thời nên **tự chuyển sang `MAN`** để giữ relay luôn bật.
+     + Khi người dùng xong việc, có lệnh tắt về 0 (`OFF`) $\rightarrow$ hệ thống **tự động trả về `AUTO` lại**.
+   - **Khi người dùng chủ động đặt `MAN`**:
+     + Bật lên 1 hay tắt về 0 **tuyệt đối không tự động chuyển chế độ** (giữ nguyên chế độ `MAN`).
+     + Chỉ chuyển sang `AUTO` khi người dùng chủ động gửi lệnh `AUTO` (hoặc Modbus ghi Reg 0 = 1).
+   - **Relay 3 (thuần MAN)**:
+     + Bật/tắt Relay 3 hoàn toàn độc lập, không bao giờ làm thay đổi chế độ `AUTO/MAN` của hệ thống.
+
+9. **Hoán đổi chân phần cứng Debug và RS485**:
+   - **RS485 (`Serial2`)**: `TX = PA2`, `RX = PA3` (USART2).
+   - **Debug (`Serial3`)**: `TX = PB10`, `RX = PB11` (USART3).
+   - Bộ giải mã Modbus RTU Slave chuẩn trực tiếp (chịu được độ trễ USB của Windows, không bị timeout, tự động in log `[RS485 RX]` và `[RS485 TX]` ra cổng Debug).
 
 ---
 

@@ -99,6 +99,7 @@ Settings settings;
 RtcTime rtc = {2026, 1, 1, 0, 0, 0};
 bool rtcValid = false;
 bool useSoftRtc = false; // Cho phep chay gio mem neu chua cam DS3231 ma cai gio qua Serial/RS485
+bool autoOverridden[2] = {false, false}; // Co danh dau Relay 1, 2 duoc bat tam thoi tu AUTO sang MAN
 
 // Bien do dong dien, cong suat, dien nang cua Relay 1
 float currentAmp = 0.0f;
@@ -336,20 +337,21 @@ bool isRelayScheduledOn(int relayIndex, uint16_t currentMinute) {
 }
 
 void checkSchedule() {
-  if (!settings.autoMode) return; // Che do MAN thi khong chay lich
-
-  // Neu RTC loi thi tat het relay de an toan
+  // Neu RTC loi va dang AUTO thi tat Relay 1 & Relay 2 de an toan
   if (!rtcValid) {
-    for (int r = 0; r < 3; r++) {
-      setRelay(r, false);
+    if (settings.autoMode) {
+      setRelay(0, false);
+      setRelay(1, false);
     }
     return;
   }
 
-  uint16_t nowMinute = rtc.hour * 60 + rtc.minute;
-  for (int r = 0; r < 3; r++) {
-    bool shouldOn = isRelayScheduledOn(r, nowMinute);
-    setRelay(r, shouldOn);
+  // Relay 1 va Relay 2 chay theo lich khi o che do AUTO
+  // Relay 3 hoan toan doc lap, dieu khien tay (MAN) khong bi can thiep
+  if (settings.autoMode) {
+    uint16_t nowMinute = rtc.hour * 60 + rtc.minute;
+    setRelay(0, isRelayScheduledOn(0, nowMinute));
+    setRelay(1, isRelayScheduledOn(1, nowMinute));
   }
 }
 
@@ -468,6 +470,8 @@ void handleCommand(const char *rawInput, char *reply, size_t replySize) {
               (strcmp(tokens[1], "AUTO") == 0 || strcmp(tokens[1], "MAN") == 0))) {
       const char *modeStr = tokens[tokenCount - 1];
       nextSettings.autoMode = (strcmp(modeStr, "AUTO") == 0);
+      autoOverridden[0] = false;
+      autoOverridden[1] = false;
       settingsChanged = true;
     }
     // 3. Lenh cai thoi gian: TIME YYYY-MM-DD HH:MM:SS
@@ -505,7 +509,33 @@ void handleCommand(const char *rawInput, char *reply, size_t replySize) {
       }
       // R1 ON hoac R1 OFF
       else if (tokenCount == 2 && (strcmp(tokens[1], "ON") == 0 || strcmp(tokens[1], "OFF") == 0)) {
-        manualOutput[relayIdx] = (strcmp(tokens[1], "ON") == 0) ? 1 : 0;
+        bool turnOn = (strcmp(tokens[1], "ON") == 0);
+        manualOutput[relayIdx] = turnOn ? 1 : 0;
+
+        // Quy tac nguoi dung:
+        // - Khi dang o che do AUTO:
+        //   + Set Relay 1 hoac 2 len 1 (ON) -> he thong chuyen sang MAN, danh dau override
+        //   + Khi xong set ve 0 (OFF) -> tu dong tro ve AUTO lai
+        // - Khi he thong dang o MAN (chu dong dat MAN):
+        //   + Set 1 hay 0 deu giu nguyen MAN, khong tu chuyen mode
+        // - Relay 3: MAN doc lap, khong anh huong che do
+        if (relayIdx == 0 || relayIdx == 1) {
+          if (turnOn) {
+            if (nextSettings.autoMode) {
+              nextSettings.autoMode = false; // Chuyen sang MAN
+              autoOverridden[relayIdx] = true;
+              settingsChanged = true;
+            }
+          } else {
+            if (autoOverridden[relayIdx]) {
+              autoOverridden[relayIdx] = false;
+              if (!autoOverridden[0] && !autoOverridden[1]) {
+                nextSettings.autoMode = true; // Tra ve AUTO
+                settingsChanged = true;
+              }
+            }
+          }
+        }
       }
       // R1 DEL1, R1 DEL23, R1 DEL123
       else if (tokenCount == 2 && strncmp(tokens[1], "DEL", 3) == 0) {
@@ -561,31 +591,23 @@ void handleCommand(const char *rawInput, char *reply, size_t replySize) {
     }
   }
 
-  // Kiem tra: neu dang o AUTO ma co lenh bat/tat tay thi bao loi nhac chuyen sang MAN
-  if (nextSettings.autoMode) {
-    for (int r = 0; r < 3; r++) {
-      if (manualOutput[r] != -1) {
-        snprintf(reply, replySize, "ERR AUTO MODE: SEND MAN FIRST");
-        return;
-      }
-    }
-  }
-
   // Ap dung cai dat moi va luu EEPROM
   if (settingsChanged) {
     settings = nextSettings;
     saveSettings();
   }
 
+  // 1. Thuc hien bat/tat tay cac relay duoc yeu cau
+  for (int r = 0; r < 3; r++) {
+    if (manualOutput[r] != -1) {
+      setRelay(r, manualOutput[r] == 1);
+    }
+  }
+
+  // 2. Neu che do la AUTO, doc RTC va cap nhat lai lich cho Relay 1 & 2
   readRtc();
   if (settings.autoMode) {
     checkSchedule();
-  } else {
-    for (int r = 0; r < 3; r++) {
-      if (manualOutput[r] != -1) {
-        setRelay(r, manualOutput[r] == 1);
-      }
-    }
   }
 
   makeStatus(reply, replySize);
@@ -841,6 +863,8 @@ void applyHoldingRegChanges(const uint16_t oldRegs[NUM_HOLDING_REGS]) {
   // 1. Kiem tra thay doi che do AUTO / MAN (Reg 0)
   if (holdingRegs[REG_MODE] != oldRegs[REG_MODE]) {
     settings.autoMode = (holdingRegs[REG_MODE] != 0);
+    autoOverridden[0] = false;
+    autoOverridden[1] = false;
     settingsChanged = true;
   }
 
@@ -868,13 +892,30 @@ void applyHoldingRegChanges(const uint16_t oldRegs[NUM_HOLDING_REGS]) {
   for (int r = 0; r < 3; r++) {
     int regIdx = REG_RELAY1 + r;
     if (holdingRegs[regIdx] != oldRegs[regIdx]) {
-      if (settings.autoMode && holdingRegs[REG_MODE] == oldRegs[REG_MODE]) {
-        settings.autoMode = false;
-        settingsChanged = true;
+      bool turnOn = (holdingRegs[regIdx] != 0);
+
+      // Chi Relay 1 & 2 moi ap dung quy tac override AUTO <-> MAN
+      if (r == 0 || r == 1) {
+        if (turnOn) {
+          // Set len 1: Neu he thong dang o AUTO -> chuyen sang MAN va danh dau override
+          if (settings.autoMode) {
+            settings.autoMode = false;
+            autoOverridden[r] = true;
+            settingsChanged = true;
+          }
+        } else {
+          // Set ve 0: Neu relay nay truoc do duoc override tu AUTO -> tra ve AUTO lai
+          if (autoOverridden[r]) {
+            autoOverridden[r] = false;
+            if (!autoOverridden[0] && !autoOverridden[1]) {
+              settings.autoMode = true;
+              settingsChanged = true;
+            }
+          }
+        }
       }
-      if (!settings.autoMode) {
-        setRelay(r, holdingRegs[regIdx] != 0);
-      }
+
+      setRelay(r, turnOn);
     }
   }
 
@@ -936,8 +977,8 @@ void handleModbus() {
     mbLastByteMs = millis();
   }
 
-  // 2. Neu da nhan byte va cach nhau >= 10ms (khoang lang giua 2 khung truyen Modbus)
-  if (mbRxLen > 0 && (millis() - mbLastByteMs >= 10)) {
+  // 2. Neu da nhan byte va cach nhau >= 15ms (khoang lang giua 2 khung truyen Modbus)
+  if (mbRxLen > 0 && (millis() - mbLastByteMs >= 15)) {
     // In ra Serial Debug de giam sat (giup biet ngay co tin hieu RS485 hay khong)
     DebugSerial.print("[RS485 RX] ");
     for (uint16_t i = 0; i < mbRxLen; i++) {
@@ -957,17 +998,26 @@ void handleModbus() {
         uint16_t startAddr = ((uint16_t)mbRxBuf[2] << 8) | mbRxBuf[3];
         uint16_t quantity = ((uint16_t)mbRxBuf[4] << 8) | mbRxBuf[5];
 
+        // Ho tro tu dong can chinh dia chi neu Modbus Poll cau hinh 40001 / 40000 / 30001
+        if (startAddr >= 40001) {
+          startAddr -= 40001;
+        } else if (startAddr >= 40000) {
+          startAddr -= 40000;
+        } else if (startAddr >= 30001) {
+          startAddr -= 30001;
+        }
+
         uint16_t snapshot[NUM_HOLDING_REGS];
         memcpy(snapshot, holdingRegs, sizeof(snapshot));
 
         uint8_t respBuf[256];
         uint16_t respLen = 0;
 
-        // Function 03: Read Holding Registers
-        if (funcCode == 0x03) {
+        // Function 03 (Read Holding Registers) & Function 04 (Read Input Registers)
+        if (funcCode == 0x03 || funcCode == 0x04) {
           if (startAddr + quantity <= NUM_HOLDING_REGS && quantity <= 125) {
             respBuf[0] = MODBUS_SLAVE_ID;
-            respBuf[1] = 0x03;
+            respBuf[1] = funcCode;
             respBuf[2] = (uint8_t)(quantity * 2);
             respLen = 3;
             for (uint16_t i = 0; i < quantity; i++) {
@@ -978,7 +1028,7 @@ void handleModbus() {
           } else {
             // Exception 02: Illegal Data Address
             respBuf[0] = MODBUS_SLAVE_ID;
-            respBuf[1] = 0x83;
+            respBuf[1] = funcCode | 0x80;
             respBuf[2] = 0x02;
             respLen = 3;
           }
@@ -1036,13 +1086,18 @@ void handleModbus() {
 
           if (RS485_DE >= 0) {
             digitalWrite(RS485_DE, HIGH);
-            delayMicroseconds(50);
+            delayMicroseconds(500); // Doi on dinh DE truoc khi truyen
           }
           RS485Serial.write(respBuf, respLen);
           RS485Serial.flush();
+          delay(3); // Doi byte cuoi cung (CRC) truyen xong hoan toan khoi thanh ghi phan cung
           if (RS485_DE >= 0) {
-            delayMicroseconds(50);
             digitalWrite(RS485_DE, LOW);
+          }
+
+          // Xoa sach cac byte echo bi doi lai vao bo dem UART RX tren duong truyen RS485 2 day
+          while (RS485Serial.available()) {
+            RS485Serial.read();
           }
 
           DebugSerial.print("[RS485 TX] Gui ");
