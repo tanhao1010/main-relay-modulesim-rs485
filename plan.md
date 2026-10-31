@@ -61,6 +61,12 @@
    - Tránh tràn số `millis()` và bảo vệ nghiêm ngặt chống tràn bộ đệm `snprintf`.
    - Tự động chốt số điện vào EEPROM định kỳ mỗi 1 giờ khi tải chạy liên tục 24/24.
 
+11. **Tính năng Chuyển tiếp tin nhắn SMS (SMS Forwarding)**:
+   - Bất kỳ tin nhắn nào nhận được từ module SIM mà **không phải là lệnh điều khiển** (ví dụ: mã OTP ngân hàng, tin nhắn thông báo cước mạng 191/Viettel/Mobi, tin nhắn người lạ...) sẽ **tự động chuyển tiếp (Forward)** nguyên văn đến số điện thoại đã được cài đặt (`settings.forwardPhone`).
+   - Mẫu tin nhắn chuyển tiếp: `[FW <SDT_người_gửi>]: <Nội dung tin nhắn gốc>`.
+   - Các tin nhắn lệnh điều khiển (`?`, `STATUS`, `AUTO`, `MAN`, `R1..R3`, `TIME`, `REPORT`, `FORWARD`...) vẫn được bộ lọc nhận diện và thực thi lệnh bình thường, phản hồi cho người gửi mà không bị chuyển tiếp nhầm.
+   - Hỗ trợ bật/tắt, tra cứu hoặc đổi số điện thoại nhận qua SMS hoặc Serial Monitor (`FW <sdt>`, `FW ?`, `FW OFF`), tự động lưu vào EEPROM.
+
 ---
 
 ## II. Bảng thanh ghi RS485 Modbus RTU (Slave ID = 1)
@@ -159,3 +165,11 @@ R3=0:0800-0900,1400-1500,2200-0600
 | `REPORT 2 08:30` | Cài đặt 2 ngày gửi 1 lần vào lúc 08h30 sáng |
 | `REPORT 7 07:00 0912345678` | Cài đặt 7 ngày (1 tuần) gửi 1 lần vào lúc 07:00 tới SĐT `0912345678` |
 | `REPORT OFF` *(hoặc `BC OFF` / `REPORT 0`)* | Tắt tính năng gửi báo cáo định kỳ |
+
+### 8. Nhóm lệnh cài đặt chuyển tiếp tin nhắn SMS (SMS Forward)
+| Lệnh gửi | Chức năng |
+|---|---|
+| `FW ?` *(hoặc `FORWARD ?`)* | Xem số điện thoại đang nhận tin nhắn chuyển tiếp (hoặc báo `OFF` nếu chưa bật) |
+| `FW 0912345678` *(hoặc `FORWARD 0912345678`)* | Cài đặt SĐT nhận chuyển tiếp là `0912345678` (lưu vào EEPROM) |
+| `FW` *(hoặc `FORWARD` gửi qua SMS)* | Bật chuyển tiếp về chính số điện thoại đang gửi tin nhắn |
+| `FW OFF` *(hoặc `FORWARD OFF` / `FW 0`)* | Tắt tính năng chuyển tiếp tin nhắn |

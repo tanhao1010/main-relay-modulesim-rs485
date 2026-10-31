@@ -238,7 +238,7 @@ int main() {
   rtcValid = true;
   simState = SIM_READY; // SIM dang san sang
   Serial1.txLen = 0;
-  Serial1.feed(">");
+  Serial1.rxLen = 0;
 
   checkPeriodicReport();
   assert(Serial1.txLen > 20); // Da phat tin nhan SMS bao cao!
@@ -288,6 +288,35 @@ int main() {
   Serial1.feed("OK\r\n");
   handleSim();
   assert(simState == SIM_READY);
+
+  // 9. Test Chuc nang Chuyen tiep tin nhan (SMS Forward)
+  // 9a. Xem trang thai ban dau: mac dinh la OFF
+  handleCommand("FW ?", reply, sizeof(reply));
+  assert(strstr(reply, "OFF") != NULL);
+
+  // 9b. Cai dat so dien thoai nhan tin chuyen tiep: FW 0912345678
+  handleCommand("FW 0912345678", reply, sizeof(reply));
+  assert(strcmp(settings.forwardPhone, "0912345678") == 0);
+  assert(strstr(reply, "0912345678") != NULL);
+
+  // 9c. Nhan tin nhan thuong (OTP / nha mang 191 / quang cao) -> Phai chuyen tiep den 0912345678
+  Serial1.txLen = 0;
+  Serial1.feed("+CMT: \"191\",\"\",\"26/10/31,14:55:00+28\"\r\nMa OTP cua ban la 839201\r\n");
+  handleSim();
+  assert(strstr(Serial1.tx, "AT+CMGS=\"0912345678\"") != NULL); // Chuyen tiep den dung so da cai!
+  assert(strstr(Serial1.tx, "[FW 191]: Ma OTP cua ban la 839201") != NULL);
+
+  // 9d. Nhan tin nhan DIEU KHIEN (vi du R1 ON) -> Xu ly lenh, KHONG duoc forward
+  Serial1.txLen = 0;
+  Serial1.feed("+CMT: \"+84988888888\",\"\",\"26/10/31,14:56:00+28\"\r\nR1 ON\r\n");
+  handleSim();
+  assert(strstr(Serial1.tx, "AT+CMGS=\"+84988888888\"") != NULL); // Tra loi cho nguoi gui lenh
+  assert(strstr(Serial1.tx, "AT+CMGS=\"0912345678\"") == NULL);  // Tuyet doi khong forward lenh dieu khien!
+
+  // 9e. Tat chuyen tiep: FW OFF
+  handleCommand("FW OFF", reply, sizeof(reply));
+  assert(settings.forwardPhone[0] == '\0');
+  assert(strstr(reply, "OFF") != NULL);
 
   printf("ALL TESTS PASSED!\n");
   return 0;

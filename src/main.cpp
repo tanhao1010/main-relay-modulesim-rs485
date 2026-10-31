@@ -79,6 +79,7 @@ struct Settings {
   uint8_t  reportMinute;         // Phut gui bao cao trong ngay (0..59, mac dinh 00 phut)
   char     reportPhone[20];      // So dien thoai nhan tin nhan bao cao
   uint32_t lastReportDay;        // Ngay cuoi cung da gui bao cao (epoch day)
+  char     forwardPhone[20];     // So dien thoai nhan tin nhan chuyen tiep (SMS Forward)
 };
 
 // Cau truc luu so dien kWh
@@ -138,12 +139,14 @@ void loadSettings() {
     settings.reportMinute = 0;    // Mac dinh 00 phut
     settings.reportPhone[0] = '\0';
     settings.lastReportDay = 0;
+    settings.forwardPhone[0] = '\0'; // Mac dinh chua cai chuyen tiep SMS
     saveSettings();
   } else {
     // Phong truong hop du lieu tu EEPROM cu chua co cac truong nay
     if (settings.reportHour > 23) settings.reportHour = 7;
     if (settings.reportMinute > 59) settings.reportMinute = 0;
     settings.reportPhone[sizeof(settings.reportPhone) - 1] = '\0';
+    settings.forwardPhone[sizeof(settings.forwardPhone) - 1] = '\0';
   }
 }
 
@@ -466,6 +469,40 @@ char *trimString(char *s) {
   return s;
 }
 
+// Ham kiem tra xem 1 chuoi tin nhan co phai la tin nhan lenh dieu khien hay khong
+bool isControlCommand(const char *rawInput) {
+  if (rawInput == NULL || *rawInput == '\0') return false;
+
+  const char *p = rawInput;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+  if (*p == '\0') return false;
+
+  char firstWord[16];
+  size_t len = 0;
+  while (*p && *p != ' ' && *p != '\t' && *p != ';' && *p != '\r' && *p != '\n' && len < sizeof(firstWord) - 1) {
+    firstWord[len++] = toupper((unsigned char)*p++);
+  }
+  firstWord[len] = '\0';
+
+  if (strcmp(firstWord, "?") == 0 || strcmp(firstWord, "STATUS") == 0) return true;
+  if (strcmp(firstWord, "AUTO") == 0 || strcmp(firstWord, "MAN") == 0) return true;
+  if (strcmp(firstWord, "SET") == 0) return true;
+  if (strcmp(firstWord, "TIME") == 0) return true;
+  if (strcmp(firstWord, "REPORT") == 0 || strcmp(firstWord, "BC") == 0) return true;
+  if (strcmp(firstWord, "FORWARD") == 0 || strcmp(firstWord, "FW") == 0) return true;
+
+  // R1, R2, R3
+  if (firstWord[0] == 'R' && firstWord[1] >= '1' && firstWord[1] <= '3' && firstWord[2] == '\0') {
+    return true;
+  }
+  // RELAY1, RELAY2, RELAY3
+  if (strncmp(firstWord, "RELAY", 5) == 0 && firstWord[5] >= '1' && firstWord[5] <= '3' && firstWord[6] == '\0') {
+    return true;
+  }
+
+  return false;
+}
+
 // Xu ly chuoi lenh (dung chung cho ca Serial Monitor va SMS)
 void handleCommand(const char *rawInput, char *reply, size_t replySize) {
   char buffer[180];
@@ -599,7 +636,38 @@ void handleCommand(const char *rawInput, char *reply, size_t replySize) {
         return;
       }
     }
-    // 5. Cac lenh lien quan den R1, R2, R3 (hoac RELAY1, RELAY2, RELAY3)
+    // 5. Lenh cai dat chuyen tiep SMS: FORWARD hoac FW (FORWARD <SDT>, FORWARD ?, FORWARD OFF)
+    else if (strcmp(tokens[0], "FORWARD") == 0 || strcmp(tokens[0], "FW") == 0) {
+      if (tokenCount == 1) {
+        // Neu chi gui moi FORWARD/FW tu SMS -> tu dong lay so nguoi gui
+        if (senderPhone[0] != '\0') {
+          strncpy(nextSettings.forwardPhone, senderPhone, sizeof(nextSettings.forwardPhone) - 1);
+          nextSettings.forwardPhone[sizeof(nextSettings.forwardPhone) - 1] = '\0';
+          settingsChanged = true;
+        } else {
+          snprintf(reply, replySize, "ERR SYNTAX: FORWARD <SDT>");
+          return;
+        }
+      } else if (tokenCount == 2 && strcmp(tokens[1], "?") == 0) {
+        if (nextSettings.forwardPhone[0] == '\0') {
+          snprintf(reply, replySize, "OK FORWARD: OFF");
+        } else {
+          snprintf(reply, replySize, "OK FORWARD: %s", nextSettings.forwardPhone);
+        }
+        return;
+      } else if (tokenCount == 2 && (strcmp(tokens[1], "OFF") == 0 || strcmp(tokens[1], "0") == 0)) {
+        nextSettings.forwardPhone[0] = '\0';
+        settingsChanged = true;
+      } else if (tokenCount == 2) {
+        strncpy(nextSettings.forwardPhone, tokens[1], sizeof(nextSettings.forwardPhone) - 1);
+        nextSettings.forwardPhone[sizeof(nextSettings.forwardPhone) - 1] = '\0';
+        settingsChanged = true;
+      } else {
+        snprintf(reply, replySize, "ERR SYNTAX: FORWARD <SDT>");
+        return;
+      }
+    }
+    // 6. Cac lenh lien quan den R1, R2, R3 (hoac RELAY1, RELAY2, RELAY3)
     else {
       int relayIdx = -1;
       if (strncmp(tokens[0], "RELAY", 5) == 0 && strlen(tokens[0]) == 6) {
@@ -731,6 +799,15 @@ void handleCommand(const char *rawInput, char *reply, size_t replySize) {
     return;
   }
 
+  if (strncmp(buffer, "FORWARD", 7) == 0 || strncmp(buffer, "FW", 2) == 0) {
+    if (settings.forwardPhone[0] == '\0') {
+      snprintf(reply, replySize, "OK FORWARD: OFF");
+    } else {
+      snprintf(reply, replySize, "OK FORWARD: %s", settings.forwardPhone);
+    }
+    return;
+  }
+
   makeStatus(reply, replySize);
 }
 
@@ -759,6 +836,8 @@ void resetSimHardware() {
   delay(200);
   digitalWrite(SIM_RST, HIGH);
   pinMode(SIM_RST, INPUT); // Tha noi (High-Z) de khong can thiep mach noi module SIM
+  simLineLen = 0;
+  waitingSmsBody = false;
 }
 
 bool isPhoneAllowed(const char *incomingPhone) {
@@ -790,6 +869,10 @@ void sendSms(const char *phone, const char *message) {
       char c = SimSerial.read();
       if (c == '>') {
         gotPrompt = true;
+        delay(10);
+        if (SimSerial.available() && SimSerial.peek() == ' ') {
+          SimSerial.read();
+        }
         break;
       }
     }
@@ -832,13 +915,29 @@ void processSimLine(char *line) {
     DebugSerial.print(": ");
     DebugSerial.println(s);
 
-    if (isPhoneAllowed(senderPhone)) {
-      char reply[180];
-      handleCommand(s, reply, sizeof(reply));
-      DebugSerial.println(reply);
-      sendSms(senderPhone, reply);
+    if (isControlCommand(s)) {
+      if (isPhoneAllowed(senderPhone)) {
+        char reply[180];
+        handleCommand(s, reply, sizeof(reply));
+        DebugSerial.println(reply);
+        sendSms(senderPhone, reply);
+      } else {
+        DebugSerial.println("Bo qua SMS: So dien thoai khong duoc phep");
+      }
     } else {
-      DebugSerial.println("Bo qua SMS: So dien thoai khong duoc phep");
+      // Khong phai SMS dieu khien (ma OTP, thong bao mang 191, tin nhan thuong...)
+      // -> Tu dong chuyen tiep (forward) den so dien thoai da cai dat
+      if (settings.forwardPhone[0] != '\0') {
+        char fwMsg[180];
+        snprintf(fwMsg, sizeof(fwMsg), "[FW %s]: %s", senderPhone, s);
+        DebugSerial.print("[SMS FORWARD] Chuyen tiep den ");
+        DebugSerial.print(settings.forwardPhone);
+        DebugSerial.print(": ");
+        DebugSerial.println(fwMsg);
+        sendSms(settings.forwardPhone, fwMsg);
+      } else {
+        DebugSerial.println("Bo qua SMS: Khong phai lenh dieu khien va chua cai SDT forward");
+      }
     }
     return;
   }
