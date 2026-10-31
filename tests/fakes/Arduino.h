@@ -9,6 +9,7 @@
 #define INPUT 0
 #define OUTPUT 1
 #define INPUT_ANALOG 2
+#define INPUT_PULLUP 3
 enum {PA1=1,PA2,PA3,PA7=7,PA9=9,PA10,PB0=16,PB1,PB5=21,PB6,PB7,PB8,PB10=26,PB11,PB12,PB13,PB14,PB15};
 extern uint64_t fakeTimeUs;
 extern unsigned fakeAdc;
@@ -17,7 +18,9 @@ inline uint32_t micros(){return (uint32_t)fakeTimeUs;}
 inline uint32_t millis(){return (uint32_t)(fakeTimeUs/1000);}
 inline void delay(unsigned ms){fakeTimeUs+=(uint64_t)ms*1000;}
 inline void delayMicroseconds(unsigned us){fakeTimeUs+=us;}
-inline void pinMode(unsigned,int){}
+inline void pinMode(unsigned pin, int mode) {
+  if (mode == INPUT_PULLUP) fakePins[pin] = HIGH;
+}
 inline void digitalWrite(unsigned pin,int state){fakePins[pin]=state;}
 inline int digitalRead(unsigned pin){return fakePins[pin];}
 inline void analogReadResolution(int){}

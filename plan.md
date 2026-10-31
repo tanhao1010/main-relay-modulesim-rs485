@@ -45,6 +45,22 @@
    - **Relay 3 (thuần MAN)**:
      + Bật/tắt Relay 3 hoàn toàn độc lập, không bao giờ làm thay đổi chế độ `AUTO/MAN` của hệ thống.
 
+9. **Hệ thống 4 nút nhấn điều khiển thủ công (`PB12..PB15`)**:
+   - **`BT1` (PB12)**: Chuyển đổi qua lại giữa `AUTO` và `MANUAL`:
+     + Khi chuyển sang **`AUTO`**: 3 relay BẬT 1s, TẮT 1s (lặp lại **2 lần**) rồi về `AUTO`.
+     + Khi chuyển sang **`MANUAL`**: 3 relay BẬT 1s, TẮT 1s (**1 lần**) rồi về `MANUAL`.
+   - **`BT2` (PB13)**: Bật / Tắt **Relay 1** (hỗ trợ quy tắc override AUTO $\leftrightarrow$ MAN).
+   - **`BT3` (PB14)**: Bật / Tắt **Relay 2** (hỗ trợ quy tắc override AUTO $\leftrightarrow$ MAN).
+   - **`BT4` (PB15)**: Bật / Tắt **Relay 3** (MAN độc lập, không ảnh hưởng chế độ hệ thống).
+   - Chạy hoàn toàn non-blocking bằng `millis()`, có chống dội phím 50ms, không làm gián đoạn Modbus / SMS.
+
+10. **Bảo vệ chạy liên tục 24/24 & Tự phục hồi module SIM**:
+   - Tự động Reset phần cứng module SIM qua chân `PB8 (SIM_RST)` khi SIM bị đơ/treo quá 3 phút.
+   - Thăm dò ngầm tự kết nối lại SIM mỗi 30 giây khi ở chế độ Offline.
+   - Không sử dụng bộ nhớ động (`String`/`malloc`), RAM chiếm < 2 KB / 20 KB.
+   - Tránh tràn số `millis()` và bảo vệ nghiêm ngặt chống tràn bộ đệm `snprintf`.
+   - Tự động chốt số điện vào EEPROM định kỳ mỗi 1 giờ khi tải chạy liên tục 24/24.
+
 ---
 
 ## II. Bảng thanh ghi RS485 Modbus RTU (Slave ID = 1)
@@ -68,6 +84,10 @@
 | **14..19** | Lịch Relay 1 | 3 mốc (ON1, OFF1, ON2, OFF2, ON3, OFF3) dạng `HHMM` | Đọc / Ghi (lưu EEPROM) |
 | **20..25** | Lịch Relay 2 | 3 mốc (ON1, OFF1, ON2, OFF2, ON3, OFF3) dạng `HHMM` | Đọc / Ghi (lưu EEPROM) |
 | **26..31** | Lịch Relay 3 | 3 mốc (ON1, OFF1, ON2, OFF2, ON3, OFF3) dạng `HHMM` | Đọc / Ghi (lưu EEPROM) |
+| **32** | Chu kỳ báo cáo | Số ngày gửi 1 lần (`0` = tắt, `1..365` ngày) | Đọc / Ghi (lưu EEPROM) |
+| **33** | Giờ gửi báo cáo | Giờ gửi trong ngày (`0..23`, mặc định `7` = 07:00 sáng) | Đọc / Ghi (lưu EEPROM) |
+| **34** | Phút gửi báo cáo | Phút gửi trong ngày (`0..59`, mặc định `0`) | Đọc / Ghi (lưu EEPROM) |
+| **35** | Đếm ngược báo cáo | Số ngày còn lại đến đợt gửi báo cáo tiếp theo | Chỉ đọc |
 
 *(Ví dụ lịch: ghi `1015` là 10h15, ghi `0` là tắt mốc).*
 
@@ -130,3 +150,12 @@ R3=0:0800-0900,1400-1500,2200-0600
 | Lệnh gửi | Chức năng |
 |---|---|
 | `TIME 2026-10-31 10:15:00` | Cài đặt ngày giờ theo định dạng `TIME YYYY-MM-DD HH:MM:SS` |
+
+### 7. Nhóm lệnh cài đặt báo cáo định kỳ (SMS / Serial)
+| Lệnh gửi | Chức năng |
+|---|---|
+| `REPORT ?` *(hoặc `BC ?`)* | Xem cấu hình báo cáo hiện tại (Số ngày, giờ gửi, số điện thoại nhận) |
+| `REPORT 1` *(hoặc `BC 1`)* | Cài đặt mỗi ngày gửi 1 lần (lúc 07:00 sáng, tự lấy SĐT người gửi SMS) |
+| `REPORT 2 08:30` | Cài đặt 2 ngày gửi 1 lần vào lúc 08h30 sáng |
+| `REPORT 7 07:00 0912345678` | Cài đặt 7 ngày (1 tuần) gửi 1 lần vào lúc 07:00 tới SĐT `0912345678` |
+| `REPORT OFF` *(hoặc `BC OFF` / `REPORT 0`)* | Tắt tính năng gửi báo cáo định kỳ |

@@ -7,11 +7,11 @@
    - Đã loại bỏ các file phụ phức tạp trước đó (`sms_pdu.cpp`, `record_store.cpp`, `control_logic.cpp`).
    - Giữ nguyên toàn bộ sơ đồ chân phần cứng (`RELAY1=PA7`, `RELAY2=PB0`, `RELAY3=PB1`, `ACS712=PA1`, `DS3231=PB6/PB7`, `SimSerial=PA9/PA10`, `DebugSerial=PA2/PA3`, `LED_ACT=PB5`).
 
-2. **Chạy độc lập không cần module SIM (Offline Mode)**:
+2. **Chạy độc lập không cần module SIM & Tự phục hồi 24/24 (Self-Healing)**:
    - Khi khởi động, hàm `handleSim()` gửi lệnh `AT` tối đa **3 lần** (mỗi lần cách nhau 2 giây bằng `millis()`, không dùng `delay()` làm đứng vòng lặp).
-   - Nếu không lắp module SIM: tự động chuyển sang trạng thái `SIM_OFFLINE`, in 1 thông báo duy nhất ra Serial và **ngừng hỏi AT** (không báo lỗi timeout lặp lại).
-   - Toàn bộ chức năng đọc giờ DS3231, đo dòng ACS712, hẹn giờ tự động `AUTO`, bật/tắt bằng tay `MAN` và điều khiển qua cổng **Serial Monitor (baud 9600)** vẫn chạy bình thường.
-   - Nếu cắm module SIM vào sau, mạch tự động nhận diện ngay khi có tín hiệu UART từ SIM.
+   - Nếu không lắp module SIM: tự động chuyển sang `SIM_OFFLINE`, in 1 thông báo duy nhất và chuyển sang chu kỳ thăm dò ngầm 30 giây (khi người dùng cắm SIM vào sau, mạch tự nhận diện và khởi tạo lại ngay mà không cần reset MCU).
+   - **Cơ chế tự phục hồi khi SIM bị đơ/treo**: Khi đang hoạt động (`SIM_READY`), mỗi 60 giây gửi nhịp Heartbeat kiểm tra. Nếu SIM bị treo/mất kết nối 3 lần liên tiếp (3 phút), mạch **tự động kích hoạt chân Reset phần cứng `PB8 (SIM_RST)`** kéo LOW 200ms để khởi động lại module SIM và tự cấu hình lại `AT+CMGF=1`, `AT+CNMI=2,2,0,0,0`.
+   - Toàn bộ chức năng đo dòng ACS712, hẹn giờ `AUTO`, nút nhấn và `RS485 Modbus` hoàn toàn không bị ảnh hưởng.
 
 3. **Giao tiếp SIM bằng SMS Text Mode (`AT+CMGF=1`)**:
    - Sử dụng tập lệnh AT cơ bản, dễ giải thích: `AT` -> `ATE0` -> `AT+CMGF=1` -> `AT+CNMI=2,2,0,0,0`.
@@ -45,6 +45,21 @@
    - **Debug (`Serial3`)**: `TX = PB10`, `RX = PB11` (USART3).
    - Bộ giải mã Modbus RTU Slave chuẩn trực tiếp (chịu được độ trễ USB của Windows, không bị timeout, tự động in log `[RS485 RX]` và `[RS485 TX]` ra cổng Debug).
 
+10. **Hệ thống 4 nút nhấn điều khiển thủ công (`PB12..PB15`)**:
+   - **`BT1` (PB12)**: Chuyển đổi chế độ `AUTO` $\leftrightarrow$ `MANUAL` với hiệu ứng báo hiệu 3 Relay (chạy bằng máy trạng thái non-blocking `millis()`, không làm đứng hệ thống):
+     + Khi chuyển sang **`AUTO`**: Cả 3 relay cùng BẬT 1s, TẮT 1s (lặp lại **2 lần**) rồi về `AUTO`.
+     + Khi chuyển sang **`MANUAL`**: Cả 3 relay cùng BẬT 1s, TẮT 1s (**1 lần**) rồi về `MANUAL`.
+   - **`BT2` (PB13)**: Bật / Tắt **Relay 1** (nếu đang ở AUTO, bật lên sẽ tạm chuyển MAN, khi tắt về sẽ tự động trả lại AUTO).
+   - **`BT3` (PB14)**: Bật / Tắt **Relay 2** (áp dụng quy tắc chuyển AUTO/MAN như Relay 1).
+   - **`BT4` (PB15)**: Bật / Tắt **Relay 3** (thuần MAN độc lập, không ảnh hưởng đến chế độ hệ thống).
+   - Đã tích hợp chống dội phím (debounce) 50ms và kích hoạt ở cạnh xuống (khi nhấn giữ không bị nhảy liên tục).
+
+11. **Bảo vệ chạy liên tục 24/24 (Không tràn RAM, không treo, không rụng kết nối)**:
+   - **Không dùng bộ nhớ động (`malloc`/`free`/`String`)**: Sử dụng toàn bộ bộ đệm tĩnh cố định (`char[]`), tổng RAM chiếm chưa đến 2 KB trên tổng số 20 KB của STM32F103 (dưới 10% RAM, an toàn tuyệt đối).
+   - **Bảo vệ tràn bộ đệm chuỗi (`snprintf`)**: Hàm `makeStatus` được bọc giới hạn chặt chẽ `pos < maxLen - 1`, triệt tiêu hoàn toàn nguy cơ ghi đè bộ nhớ khi chạy lâu ngày.
+   - **An toàn tràn số `millis()`**: Toàn bộ các phép đo thời gian đều sử dụng phép trừ số nguyên không dấu `millis() - lastTime >= interval`, hoạt động chính xác vĩnh viễn kể cả khi `millis()` tràn số sau 49.7 ngày.
+   - **Tự động sao lưu điện năng định kỳ**: Ngoài việc chốt số điện khi Relay 1 đổi trạng thái, hệ thống có cơ chế tự động sao lưu số điện vào EEPROM định kỳ mỗi 1 giờ (nếu có tiêu thụ $\ge 0.05\text{ kWh}$) để chống mất dữ liệu khi cúp điện lúc relay chạy liên tục 24/24.
+
 ---
 
 ## II. Bảng thanh ghi RS485 Modbus RTU (Slave ID = 1)
@@ -68,6 +83,10 @@
 | **14..19** | Lịch Relay 1 | 3 mốc (ON1, OFF1, ON2, OFF2, ON3, OFF3) dạng `HHMM` | Đọc / Ghi (lưu EEPROM) |
 | **20..25** | Lịch Relay 2 | 3 mốc (ON1, OFF1, ON2, OFF2, ON3, OFF3) dạng `HHMM` | Đọc / Ghi (lưu EEPROM) |
 | **26..31** | Lịch Relay 3 | 3 mốc (ON1, OFF1, ON2, OFF2, ON3, OFF3) dạng `HHMM` | Đọc / Ghi (lưu EEPROM) |
+| **32** | Chu kỳ báo cáo | Số ngày gửi 1 lần (`0` = tắt, `1..365` ngày) | Đọc / Ghi (lưu EEPROM) |
+| **33** | Giờ gửi báo cáo | Giờ gửi trong ngày (`0..23`, mặc định `7` = 07:00 sáng) | Đọc / Ghi (lưu EEPROM) |
+| **34** | Phút gửi báo cáo | Phút gửi trong ngày (`0..59`, mặc định `0`) | Đọc / Ghi (lưu EEPROM) |
+| **35** | Đếm ngược báo cáo | Số ngày còn lại đến đợt gửi báo cáo tiếp theo | Chỉ đọc |
 
 *(Ví dụ lịch: ghi `1015` là 10h15, ghi `0` là tắt mốc).*
 
@@ -132,4 +151,13 @@ R3=0:0800-0900,1400-1500,2200-0600
 | Lệnh gửi | Chức năng |
 |---|---|
 | `TIME 2026-10-31 10:15:00` | Cài đặt ngày giờ theo định dạng `TIME YYYY-MM-DD HH:MM:SS` |
+
+### 7. Nhóm lệnh cài đặt báo cáo định kỳ (SMS / Serial)
+| Lệnh gửi | Chức năng |
+|---|---|
+| `REPORT ?` *(hoặc `BC ?`)* | Xem cấu hình báo cáo hiện tại (Số ngày, giờ gửi, số điện thoại nhận) |
+| `REPORT 1` *(hoặc `BC 1`)* | Cài đặt mỗi ngày gửi 1 lần (lúc 07:00 sáng, tự lấy SĐT người gửi SMS) |
+| `REPORT 2 08:30` | Cài đặt 2 ngày gửi 1 lần vào lúc 08h30 sáng |
+| `REPORT 7 07:00 0912345678` | Cài đặt 7 ngày (1 tuần) gửi 1 lần vào lúc 07:00 tới SĐT `0912345678` |
+| `REPORT OFF` *(hoặc `BC OFF` / `REPORT 0`)* | Tắt tính năng gửi báo cáo định kỳ |
 

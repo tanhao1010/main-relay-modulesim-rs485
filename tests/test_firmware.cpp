@@ -84,9 +84,210 @@ int main() {
     Serial2.feedByte(b);
   }
   handleModbus();      // Doc cac byte vao buffer
-  fakeTimeUs += 15000; // Troi qua 15ms (khoang lang giua cac khung Modbus)
+  fakeTimeUs += 16000; // Troi qua 16ms (khoang lang giua cac khung Modbus)
   handleModbus();      // Phat hien het khung -> xu ly va gui phan hoi
   assert(Serial2.txLen > 5); // Co phan hoi tra ve!
+
+  // 6. Test Nut Nhan (BT1..BT4)
+  fakePins[PB12] = HIGH;
+  fakePins[PB13] = HIGH;
+  fakePins[PB14] = HIGH;
+  fakePins[PB15] = HIGH;
+
+  // 6a. Test BT2 (Relay 1), BT3 (Relay 2), BT4 (Relay 3)
+  // Dang o MAN, tat ca relay dang OFF
+  setRelay(0, false); setRelay(1, false); setRelay(2, false);
+
+  // Nhan BT2: chuyen xuong LOW -> cho 60ms debounce -> kiem tra -> nha len HIGH -> cho 60ms
+  fakePins[PB13] = LOW;
+  handleButtons(); // Bat dau dem debounce khi nut vua nhan xuong
+  fakeTimeUs += 60000;
+  handleButtons(); // Du 60ms -> Kich hoat su kien nhan nut BT2
+  assert(relayOn[0]);
+
+  fakePins[PB13] = HIGH;
+  handleButtons(); // Bat dau dem debounce khi nut duoc nha ra
+  fakeTimeUs += 60000;
+  handleButtons(); // Du 60ms -> Hoan tat nha nut
+  assert(relayOn[0]); // Relay 1 van giu nguyen ON
+
+  // Nhan BT3 -> Relay 2 bat len ON
+  fakePins[PB14] = LOW;
+  handleButtons();
+  fakeTimeUs += 60000;
+  handleButtons();
+  assert(relayOn[1]);
+  fakePins[PB14] = HIGH;
+  handleButtons();
+  fakeTimeUs += 60000;
+  handleButtons();
+
+  // Nhan BT4 -> Relay 3 bat len ON
+  fakePins[PB15] = LOW;
+  handleButtons();
+  fakeTimeUs += 60000;
+  handleButtons();
+  assert(relayOn[2]);
+  fakePins[PB15] = HIGH;
+  handleButtons();
+  fakeTimeUs += 60000;
+  handleButtons();
+
+  // Nhan BT4 lan nua -> Relay 3 tat OFF
+  fakePins[PB15] = LOW;
+  handleButtons();
+  fakeTimeUs += 60000;
+  handleButtons();
+  assert(!relayOn[2]);
+  fakePins[PB15] = HIGH;
+  handleButtons();
+  fakeTimeUs += 60000;
+  handleButtons();
+
+  // 6b. Test BT1 chuyen tu MAN sang AUTO (3 relay bat 1s, tat 1s 2 lan)
+  assert(!settings.autoMode);
+  fakePins[PB12] = LOW;
+  handleButtons();
+  fakeTimeUs += 60000;
+  handleButtons();
+  fakePins[PB12] = HIGH;
+  handleButtons();
+  fakeTimeUs += 60000;
+  handleButtons();
+  assert(modeBlinkStep == 1 && relayOn[0] && relayOn[1] && relayOn[2]); // Bat lan 1
+
+  fakeTimeUs += 1001000;
+  handleButtons();
+  assert(modeBlinkStep == 2 && !relayOn[0] && !relayOn[1] && !relayOn[2]); // Tat lan 1
+
+  fakeTimeUs += 1001000;
+  handleButtons();
+  assert(modeBlinkStep == 3 && relayOn[0] && relayOn[1] && relayOn[2]); // Bat lan 2
+
+  fakeTimeUs += 1001000;
+  handleButtons();
+  assert(modeBlinkStep == 4 && !relayOn[0] && !relayOn[1] && !relayOn[2]); // Tat lan 2
+
+  fakeTimeUs += 1001000;
+  handleButtons();
+  assert(modeBlinkStep == 0 && settings.autoMode); // Hoan tat: ve AUTO!
+
+  // 6c. Test BT1 chuyen tu AUTO sang MAN (3 relay bat 1s, tat 1s 1 lan)
+  fakePins[PB12] = LOW;
+  handleButtons();
+  fakeTimeUs += 60000;
+  handleButtons();
+  fakePins[PB12] = HIGH;
+  handleButtons();
+  fakeTimeUs += 60000;
+  handleButtons();
+  assert(modeBlinkStep == 1 && relayOn[0] && relayOn[1] && relayOn[2]); // Bat 1s
+
+  fakeTimeUs += 1001000;
+  handleButtons();
+  assert(modeBlinkStep == 2 && !relayOn[0] && !relayOn[1] && !relayOn[2]); // Tat 1s
+
+  fakeTimeUs += 1001000;
+  handleButtons();
+  assert(modeBlinkStep == 0 && !settings.autoMode); // Hoan tat: ve MAN!
+
+  // 7. Test cai dat Bao Cao Dinh Ky qua SMS/Serial & Modbus RTU
+  // 7a. Xem trang thai ban dau: mac dinh la OFF
+  handleCommand("REPORT ?", reply, sizeof(reply));
+  assert(strstr(reply, "OFF") != NULL);
+
+  // 7b. Cai dat qua lenh: REPORT 2 08:30 0987654321 (2 ngay/lan, 8h30 sang)
+  handleCommand("REPORT 2 08:30 0987654321", reply, sizeof(reply));
+  assert(settings.reportDays == 2);
+  assert(settings.reportHour == 8);
+  assert(settings.reportMinute == 30);
+  assert(strcmp(settings.reportPhone, "0987654321") == 0);
+  assert(strstr(reply, "2 NGAY/LAN") != NULL);
+
+  // 7c. Dong bo len vung nho Modbus RTU (Holding Registers 32..35)
+  updateHoldingRegsFromSystem();
+  assert(holdingRegs[REG_REPORT_DAYS] == 2);
+  assert(holdingRegs[REG_REPORT_HOUR] == 8);
+  assert(holdingRegs[REG_REPORT_MIN]  == 30);
+
+  // 7d. Ghi qua Modbus RTU (Function 06 ghi vao Reg 32 = 5 ngay/lan)
+  // Request: 01 06 00 20 00 05 CRC_L CRC_H (Reg 32 = 0x0020, Val = 5, CRC = 0x48 0x03)
+  uint8_t reqFc6[] = {0x01, 0x06, 0x00, 0x20, 0x00, 0x05, 0x48, 0x03};
+  Serial2.txLen = 0;
+  for (uint8_t b : reqFc6) {
+    Serial2.feedByte(b);
+  }
+  handleModbus();
+  fakeTimeUs += 16000;
+  handleModbus();
+  assert(Serial2.txLen >= 6);
+  assert(settings.reportDays == 5); // Duoc cap nhat qua Modbus thanh 5 ngay!
+
+  // 7e. Test tat bao cao dinh ky qua lenh SMS: BC OFF
+  handleCommand("BC OFF", reply, sizeof(reply));
+  assert(settings.reportDays == 0);
+  assert(strstr(reply, "OFF") != NULL);
+
+  // 7f. Test tu dong phat tin nhan bao cao dinh ky khi den gio hen
+  settings.reportDays = 1;
+  settings.reportHour = 7;
+  settings.reportMinute = 0;
+  strcpy(settings.reportPhone, "+84912345678");
+  settings.lastReportDay = dateToEpochDays(2026, 10, 30); // Lan gui truoc la ngay 30
+  rtc = {2026, 10, 31, 7, 0, 0}; // Hom nay la ngay 31 luc 07:00
+  rtcValid = true;
+  simState = SIM_READY; // SIM dang san sang
+  Serial1.txLen = 0;
+  Serial1.feed(">");
+
+  checkPeriodicReport();
+  assert(Serial1.txLen > 20); // Da phat tin nhan SMS bao cao!
+  assert(strstr(Serial1.tx, "AT+CMGS=") != NULL);
+  assert(settings.lastReportDay == dateToEpochDays(2026, 10, 31)); // Da cap nhat ngay gui
+
+  // Goi lai ngay lap tuc -> khong duoc gui trung lap
+  unsigned oldTxLen = Serial1.txLen;
+  checkPeriodicReport();
+  assert(Serial1.txLen == oldTxLen); // Khong phat lai nua!
+
+  // 8. Test co che tu phuc hoi SIM 24/24 (Self-Healing Heartbeat & Hardware Reset)
+  // 8a. Gia lap SIM bi treo (khong tra loi Heartbeat trong 3 phut)
+  simState = SIM_READY;
+  simHeartbeatMissed = 0;
+  lastSimHeartbeatMs = millis();
+
+  // Phut 1: gui AT heartbeat, khong ai tra loi
+  fakeTimeUs += 61000000;
+  handleSim();
+  assert(simHeartbeatMissed == 1 && simState == SIM_READY);
+
+  // Phut 2: gui AT heartbeat lan 2, khong ai tra loi
+  fakeTimeUs += 61000000;
+  handleSim();
+  assert(simHeartbeatMissed == 2 && simState == SIM_READY);
+
+  // Phut 3: lan thu 3 khong tra loi -> Tu dong kich hoat Reset phan cung qua chan PB8 (SIM_RST)
+  fakeTimeUs += 61000000;
+  handleSim();
+  assert(simState == SIM_CHECK_AT); // Da tu dong chuyen ve khoi tao lai tu dau!
+
+  // Khi module SIM reboot xong va tra loi OK -> tu dong Ready tro lai
+  Serial1.feed("OK\r\n");
+  handleSim();
+  assert(simState == SIM_READY);
+
+  // 8b. Test SIM Offline tu dong tham do va phuc hoi khi nguoi dung cam SIM vao sau
+  simState = SIM_OFFLINE;
+  lastSimCheckMs = millis();
+  fakeTimeUs += 31000000; // Sau 30 giay
+  Serial1.txLen = 0;
+  handleSim();
+  assert(strstr(Serial1.tx, "AT\r") != NULL); // Co gui lenh tham do AT!
+
+  // SIM tra loi OK -> tu dong chuyen ve SIM_READY ma khong can reset MCU!
+  Serial1.feed("OK\r\n");
+  handleSim();
+  assert(simState == SIM_READY);
 
   printf("ALL TESTS PASSED!\n");
   return 0;

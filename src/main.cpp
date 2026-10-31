@@ -74,6 +74,11 @@ struct Settings {
   uint32_t magic;
   bool autoMode;                 // true = AUTO, false = MAN
   ScheduleSlot schedules[3][3];  // 3 relay (0..2), moi relay 3 moc (0..2)
+  uint16_t reportDays;           // So ngay bao cao 1 lan (0 = tat, 1..365 ngay)
+  uint8_t  reportHour;           // Gio gui bao cao trong ngay (0..23, mac dinh 7h sang)
+  uint8_t  reportMinute;         // Phut gui bao cao trong ngay (0..59, mac dinh 00 phut)
+  char     reportPhone[20];      // So dien thoai nhan tin nhan bao cao
+  uint32_t lastReportDay;        // Ngay cuoi cung da gui bao cao (epoch day)
 };
 
 // Cau truc luu so dien kWh
@@ -100,6 +105,8 @@ RtcTime rtc = {2026, 1, 1, 0, 0, 0};
 bool rtcValid = false;
 bool useSoftRtc = false; // Cho phep chay gio mem neu chua cam DS3231 ma cai gio qua Serial/RS485
 bool autoOverridden[2] = {false, false}; // Co danh dau Relay 1, 2 duoc bat tam thoi tu AUTO sang MAN
+int modeBlinkStep = 0; // 0: ranh roi, 1..4: dang thuc hien hieu ung nhap nhay chuyen che do BT1
+char senderPhone[32] = ""; // So dien thoai gui tin nhan den (SMS)
 
 // Bien do dong dien, cong suat, dien nang cua Relay 1
 float currentAmp = 0.0f;
@@ -126,7 +133,17 @@ void loadSettings() {
         settings.schedules[r][i].offMinute = 0;
       }
     }
+    settings.reportDays = 0;      // Mac dinh tat bao cao dinh ky
+    settings.reportHour = 7;      // Mac dinh 7h sang
+    settings.reportMinute = 0;    // Mac dinh 00 phut
+    settings.reportPhone[0] = '\0';
+    settings.lastReportDay = 0;
     saveSettings();
+  } else {
+    // Phong truong hop du lieu tu EEPROM cu chua co cac truong nay
+    if (settings.reportHour > 23) settings.reportHour = 7;
+    if (settings.reportMinute > 59) settings.reportMinute = 0;
+    settings.reportPhone[sizeof(settings.reportPhone) - 1] = '\0';
   }
 }
 
@@ -337,6 +354,8 @@ bool isRelayScheduledOn(int relayIndex, uint16_t currentMinute) {
 }
 
 void checkSchedule() {
+  if (modeBlinkStep > 0) return; // Dang chay hieu ung nhap nhay BT1 thi khong can thiep relay
+
   // Neu RTC loi va dang AUTO thi tat Relay 1 & Relay 2 de an toan
   if (!rtcValid) {
     if (settings.autoMode) {
@@ -377,20 +396,47 @@ void makeStatus(char *out, size_t maxLen) {
                      wattInt,
                      kwhX1000 / 1000, kwhX1000 % 1000);
 
+  if (pos < 0) pos = 0;
+  if (pos >= (int)maxLen) pos = maxLen - 1;
+
   for (int r = 0; r < 3; r++) {
-    pos += snprintf(out + pos, maxLen - pos, "\nR%d=%d:", r + 1, relayOn[r] ? 1 : 0);
+    if (pos >= (int)maxLen - 1) break;
+    int n = snprintf(out + pos, maxLen - pos, "\nR%d=%d:", r + 1, relayOn[r] ? 1 : 0);
+    if (n > 0) pos += n;
+    if (pos >= (int)maxLen - 1) break;
+
     for (int i = 0; i < 3; i++) {
+      if (pos >= (int)maxLen - 1) break;
       ScheduleSlot s = settings.schedules[r][i];
+      int nSlot = 0;
       if (s.enabled) {
-        pos += snprintf(out + pos, maxLen - pos, "%s%02u%02u-%02u%02u",
+        nSlot = snprintf(out + pos, maxLen - pos, "%s%02u%02u-%02u%02u",
                         (i > 0) ? "," : "",
                         s.onMinute / 60, s.onMinute % 60,
                         s.offMinute / 60, s.offMinute % 60);
       } else {
-        pos += snprintf(out + pos, maxLen - pos, "%s--", (i > 0) ? "," : "");
+        nSlot = snprintf(out + pos, maxLen - pos, "%s--", (i > 0) ? "," : "");
       }
+      if (nSlot > 0) pos += nSlot;
     }
   }
+  out[maxLen - 1] = '\0';
+}
+
+// Ham tinh so ngay tu nam 2000 den ngay hien tai (phuc vu tinh chu ky bao cao theo ngay)
+uint32_t dateToEpochDays(uint16_t y, uint8_t m, uint8_t d) {
+  static const uint16_t daysBeforeMonth[13] = {
+    0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
+  };
+  if (y < 2000) y = 2000;
+  if (m < 1 || m > 12) m = 1;
+  uint32_t days = (uint32_t)(y - 2000) * 365 + ((uint32_t)(y - 2000 + 3) / 4);
+  days += daysBeforeMonth[m];
+  if (m > 2 && (y % 4 == 0)) {
+    days++;
+  }
+  days += d;
+  return days;
 }
 
 // Ham chuyen chuoi "1015" hoac "10:15" hoac "10H15" sang so phut trong ngay
@@ -489,7 +535,71 @@ void handleCommand(const char *rawInput, char *reply, size_t replySize) {
         return;
       }
     }
-    // 4. Cac lenh lien quan den R1, R2, R3 (hoac RELAY1, RELAY2, RELAY3)
+    // 4. Lenh cai dat bao cao dinh ky: REPORT hoac BC (REPORT <days> [HH:MM] [SDT])
+    else if (strcmp(tokens[0], "REPORT") == 0 || strcmp(tokens[0], "BC") == 0) {
+      if (tokenCount == 2 && strcmp(tokens[1], "?") == 0) {
+        if (nextSettings.reportDays == 0) {
+          snprintf(reply, replySize, "OK REPORT: OFF");
+        } else {
+          snprintf(reply, replySize, "OK REPORT: %d NGAY/LAN (%02u:%02u) SDT:%s",
+                   nextSettings.reportDays, nextSettings.reportHour, nextSettings.reportMinute,
+                   nextSettings.reportPhone[0] ? nextSettings.reportPhone : ALLOWED_PHONE);
+        }
+        return;
+      } else if (tokenCount == 2 && (strcmp(tokens[1], "OFF") == 0 || strcmp(tokens[1], "0") == 0)) {
+        nextSettings.reportDays = 0;
+        settingsChanged = true;
+      } else if (tokenCount >= 2) {
+        int days = atoi(tokens[1]);
+        if (days <= 0 || days > 365) {
+          snprintf(reply, replySize, "ERR REPORT DAYS (1..365)");
+          return;
+        }
+        nextSettings.reportDays = (uint16_t)days;
+
+        uint8_t h = 7, m = 0;
+        if (tokenCount >= 3) {
+          uint16_t totalMin = 0;
+          if (parseTimeMinute(tokens[2], totalMin)) {
+            h = totalMin / 60;
+            m = totalMin % 60;
+          } else {
+            int hh = atoi(tokens[2]);
+            if (hh >= 0 && hh <= 23 && isdigit(tokens[2][0])) {
+              h = hh;
+              m = 0;
+            } else if (tokens[2][0] == '0' || tokens[2][0] == '+') {
+              strncpy(nextSettings.reportPhone, tokens[2], sizeof(nextSettings.reportPhone) - 1);
+              nextSettings.reportPhone[sizeof(nextSettings.reportPhone) - 1] = '\0';
+            } else {
+              snprintf(reply, replySize, "ERR REPORT TIME (HH:MM)");
+              return;
+            }
+          }
+        }
+        nextSettings.reportHour = h;
+        nextSettings.reportMinute = m;
+
+        if (tokenCount >= 4) {
+          strncpy(nextSettings.reportPhone, tokens[3], sizeof(nextSettings.reportPhone) - 1);
+          nextSettings.reportPhone[sizeof(nextSettings.reportPhone) - 1] = '\0';
+        } else if (senderPhone[0] != '\0' && nextSettings.reportPhone[0] == '\0') {
+          strncpy(nextSettings.reportPhone, senderPhone, sizeof(nextSettings.reportPhone) - 1);
+          nextSettings.reportPhone[sizeof(nextSettings.reportPhone) - 1] = '\0';
+        }
+
+        if (rtcValid) {
+          nextSettings.lastReportDay = dateToEpochDays(rtc.year, rtc.month, rtc.day);
+        } else {
+          nextSettings.lastReportDay = 0;
+        }
+        settingsChanged = true;
+      } else {
+        snprintf(reply, replySize, "ERR SYNTAX: REPORT <DAYS> [HH:MM] [SDT]");
+        return;
+      }
+    }
+    // 5. Cac lenh lien quan den R1, R2, R3 (hoac RELAY1, RELAY2, RELAY3)
     else {
       int relayIdx = -1;
       if (strncmp(tokens[0], "RELAY", 5) == 0 && strlen(tokens[0]) == 6) {
@@ -610,10 +720,21 @@ void handleCommand(const char *rawInput, char *reply, size_t replySize) {
     checkSchedule();
   }
 
+  if (strncmp(buffer, "REPORT", 6) == 0 || strncmp(buffer, "BC", 2) == 0) {
+    if (settings.reportDays == 0) {
+      snprintf(reply, replySize, "OK REPORT: OFF");
+    } else {
+      snprintf(reply, replySize, "OK REPORT: %d NGAY/LAN (%02u:%02u) SDT:%s",
+               settings.reportDays, settings.reportHour, settings.reportMinute,
+               settings.reportPhone[0] ? settings.reportPhone : ALLOWED_PHONE);
+    }
+    return;
+  }
+
   makeStatus(reply, replySize);
 }
 
-// ==================== 9. GIAO TIEP MODULE SIM (TEXT MODE - KHONG CO SIM VAN CHAY) ====================
+// ==================== 9. GIAO TIEP MODULE SIM (TEXT MODE - KHONG CO SIM VAN CHAY, TU PHUC HOI 24/24) ====================
 enum SimInitState {
   SIM_CHECK_AT,
   SIM_READY,
@@ -621,13 +742,24 @@ enum SimInitState {
 };
 
 SimInitState simState = SIM_CHECK_AT;
-uint32_t lastSimCheckMs = 0;
-int simRetryCount = 0;
+uint32_t lastSimCheckMs     = 0;
+uint32_t lastSimHeartbeatMs = 0;
+int simRetryCount          = 0;
+int simHeartbeatMissed     = 0;
 
 bool waitingSmsBody = false;
-char senderPhone[32] = "";
 char simLineBuf[200];
 int simLineLen = 0;
+
+// Ham kich hoat chan Reset phan cung PB8 cua module SIM khi bi treo
+void resetSimHardware() {
+  DebugSerial.println("[SIM] Canh bao: Dang Reset phan cung qua chan PB8 (SIM_RST)...");
+  pinMode(SIM_RST, OUTPUT);
+  digitalWrite(SIM_RST, LOW);
+  delay(200);
+  digitalWrite(SIM_RST, HIGH);
+  pinMode(SIM_RST, INPUT); // Tha noi (High-Z) de khong can thiep mach noi module SIM
+}
 
 bool isPhoneAllowed(const char *incomingPhone) {
   if (ALLOWED_PHONE[0] == '\0') return true;
@@ -661,6 +793,7 @@ void sendSms(const char *phone, const char *message) {
         break;
       }
     }
+    delay(1);
   }
 
   if (gotPrompt) {
@@ -676,19 +809,24 @@ void processSimLine(char *line) {
   char *s = trimString(line);
   if (*s == '\0') return;
 
-  if (simState != SIM_READY && strcmp(s, "OK") == 0) {
-    simState = SIM_READY;
-    SimSerial.print("ATE0\r");
-    delay(50);
-    SimSerial.print("AT+CMGF=1\r");
-    delay(50);
-    SimSerial.print("AT+CNMI=2,2,0,0,0\r");
-    DebugSerial.println("Module SIM da san sang (Text Mode)");
+  // Khi nhan duoc OK tu module SIM
+  if (strcmp(s, "OK") == 0) {
+    simHeartbeatMissed = 0; // Co phan hoi song tu SIM
+    if (simState != SIM_READY) {
+      simState = SIM_READY;
+      SimSerial.print("ATE0\r");
+      delay(50);
+      SimSerial.print("AT+CMGF=1\r");
+      delay(50);
+      SimSerial.print("AT+CNMI=2,2,0,0,0\r");
+      DebugSerial.println("Module SIM da san sang (Text Mode)");
+    }
     return;
   }
 
   if (waitingSmsBody) {
     waitingSmsBody = false;
+    simHeartbeatMissed = 0;
     DebugSerial.print("Nhan SMS tu ");
     DebugSerial.print(senderPhone);
     DebugSerial.print(": ");
@@ -707,6 +845,7 @@ void processSimLine(char *line) {
 
   if (strncmp(s, "+CMT:", 5) == 0) {
     simState = SIM_READY;
+    simHeartbeatMissed = 0;
     char *firstQuote = strchr(s, '"');
     if (firstQuote) {
       char *secondQuote = strchr(firstQuote + 1, '"');
@@ -735,15 +874,82 @@ void handleSim() {
     }
   }
 
+  uint32_t now = millis();
+
+  // 1. Giai doan khoi dong ban dau hoac sau khi Reset module SIM
   if (simState == SIM_CHECK_AT) {
-    if (millis() - lastSimCheckMs >= 2000) {
-      lastSimCheckMs = millis();
+    if (now - lastSimCheckMs >= 2000) {
+      lastSimCheckMs = now;
       if (simRetryCount < 3) {
         SimSerial.print("AT\r");
         simRetryCount++;
       } else {
         simState = SIM_OFFLINE;
         DebugSerial.println("Khong phat hien module SIM -> Chay binh thuong (Serial & RS485)");
+      }
+    }
+  }
+  // 2. Giai doan Offline: Dinh ky moi 30 giay gui AT de phat hien neu nguoi dung cam SIM vao sau
+  else if (simState == SIM_OFFLINE) {
+    if (now - lastSimCheckMs >= 30000) {
+      lastSimCheckMs = now;
+      SimSerial.print("AT\r");
+    }
+  }
+  // 3. Giai doan Ready: Dinh ky moi 60 giay gui nhip Heartbeat kiem tra SIM co con song khong
+  else if (simState == SIM_READY) {
+    if (now - lastSimHeartbeatMs >= 60000) {
+      lastSimHeartbeatMs = now;
+      simHeartbeatMissed++;
+
+      // Neu 3 lan lien tiep (3 phut) SIM khong he tra loi -> Module SIM da bi treo/mat mang
+      if (simHeartbeatMissed >= 3) {
+        DebugSerial.println("[SIM] Canh bao: Module SIM bi treo -> Tu dong Reset phan cung qua chan PB8 (SIM_RST)!");
+        resetSimHardware();
+        simState = SIM_CHECK_AT;
+        simRetryCount = 0;
+        simHeartbeatMissed = 0;
+        lastSimCheckMs = now;
+      } else {
+        SimSerial.print("AT\r");
+      }
+    }
+  }
+}
+
+// Kiem tra va phat tin nhan bao cao dinh ky (theo so ngay duoc cai dat)
+void checkPeriodicReport() {
+  if (settings.reportDays == 0 || !rtcValid) return;
+
+  uint32_t todayEpoch = dateToEpochDays(rtc.year, rtc.month, rtc.day);
+
+  // Kiem tra dung gio va phut hen gui
+  if (rtc.hour == settings.reportHour && rtc.minute == settings.reportMinute) {
+    if (settings.lastReportDay == 0 || (todayEpoch >= settings.lastReportDay + settings.reportDays)) {
+      static uint32_t lastTriggerEpoch = 0;
+      static uint16_t lastTriggerMin = 0xFFFF;
+      uint16_t nowMin = rtc.hour * 60 + rtc.minute;
+
+      if (lastTriggerEpoch != todayEpoch || lastTriggerMin != nowMin) {
+        lastTriggerEpoch = todayEpoch;
+        lastTriggerMin   = nowMin;
+
+        settings.lastReportDay = todayEpoch;
+        saveSettings();
+
+        char reportMsg[180];
+        makeStatus(reportMsg, sizeof(reportMsg));
+
+        DebugSerial.print("[REPORT] Phat tin nhan bao cao dinh ky: ");
+        DebugSerial.println(reportMsg);
+
+        // Uu tien gui toi reportPhone neu co cai dat, neu khong thi ALLOWED_PHONE
+        const char *targetPhone = (settings.reportPhone[0] != '\0') ? settings.reportPhone : ALLOWED_PHONE;
+        if (targetPhone[0] != '\0') {
+          sendSms(targetPhone, reportMsg);
+        } else {
+          DebugSerial.println("[REPORT] Chua co so dien thoai nhan bao cao!");
+        }
       }
     }
   }
@@ -768,23 +974,31 @@ void handleSim() {
 //   Reg 14..19: Lich Relay 1 (ON1, OFF1, ON2, OFF2, ON3, OFF3) dang HHMM (VD: 1015 = 10h15, 0 = tat)
 //   Reg 20..25: Lich Relay 2 (ON1, OFF1, ON2, OFF2, ON3, OFF3) dang HHMM
 //   Reg 26..31: Lich Relay 3 (ON1, OFF1, ON2, OFF2, ON3, OFF3) dang HHMM
+//   Reg 32: Bao cao dinh ky - So ngay chu ky (0 = tat, 1..365 ngay) [Doc / Ghi -> luu EEPROM]
+//   Reg 33: Bao cao dinh ky - Gio gui trong ngay (0..23, mac dinh 7)   [Doc / Ghi -> luu EEPROM]
+//   Reg 34: Bao cao dinh ky - Phut gui trong ngay (0..59, mac dinh 0)  [Doc / Ghi -> luu EEPROM]
+//   Reg 35: Bao cao dinh ky - So ngay con lai den lan gui tiep theo     [Chi doc]
 enum HoldingRegMap {
-  REG_MODE       = 0,
-  REG_RELAY1     = 1,
-  REG_RELAY2     = 2,
-  REG_RELAY3     = 3,
-  REG_CURRENT    = 4,
-  REG_POWER      = 5,
-  REG_ENERGY_HI  = 6,
-  REG_ENERGY_LO  = 7,
-  REG_RTC_HOUR   = 8,
-  REG_RTC_MIN    = 9,
-  REG_RTC_SEC    = 10,
-  REG_RTC_DAY    = 11,
-  REG_RTC_MONTH  = 12,
-  REG_RTC_YEAR   = 13,
-  REG_SCHED_BASE = 14, // 18 thanh ghi (14..31) cho 3 relay x 3 moc (ON, OFF)
-  NUM_HOLDING_REGS = 128
+  REG_MODE          = 0,
+  REG_RELAY1        = 1,
+  REG_RELAY2        = 2,
+  REG_RELAY3        = 3,
+  REG_CURRENT       = 4,
+  REG_POWER         = 5,
+  REG_ENERGY_HI     = 6,
+  REG_ENERGY_LO     = 7,
+  REG_RTC_HOUR      = 8,
+  REG_RTC_MIN       = 9,
+  REG_RTC_SEC       = 10,
+  REG_RTC_DAY       = 11,
+  REG_RTC_MONTH     = 12,
+  REG_RTC_YEAR      = 13,
+  REG_SCHED_BASE    = 14, // 18 thanh ghi (14..31) cho 3 relay x 3 moc (ON, OFF)
+  REG_REPORT_DAYS   = 32, // So ngay chu ky bao cao (0 = tat, 1..365 ngay) [Doc / Ghi]
+  REG_REPORT_HOUR   = 33, // Gio hen gui bao cao trong ngay (0..23)        [Doc / Ghi]
+  REG_REPORT_MIN    = 34, // Phut hen gui bao cao trong ngay (0..59)       [Doc / Ghi]
+  REG_REPORT_REMAIN = 35, // So ngay con lai den dot gui tiep theo         [Chi doc]
+  NUM_HOLDING_REGS  = 128
 };
 
 uint16_t holdingRegs[NUM_HOLDING_REGS] = {};
@@ -852,6 +1066,23 @@ void updateHoldingRegsFromSystem() {
         holdingRegs[baseIdx]     = 0;
         holdingRegs[baseIdx + 1] = 0;
       }
+    }
+  }
+
+  // Cap nhat cai dat bao cao dinh ky len Modbus
+  holdingRegs[REG_REPORT_DAYS] = settings.reportDays;
+  holdingRegs[REG_REPORT_HOUR] = settings.reportHour;
+  holdingRegs[REG_REPORT_MIN]  = settings.reportMinute;
+
+  // Tinh so ngay con lai den lan gui tiep theo
+  if (settings.reportDays == 0 || !rtcValid || settings.lastReportDay == 0) {
+    holdingRegs[REG_REPORT_REMAIN] = 0;
+  } else {
+    uint32_t today = dateToEpochDays(rtc.year, rtc.month, rtc.day);
+    if (today >= settings.lastReportDay + settings.reportDays) {
+      holdingRegs[REG_REPORT_REMAIN] = 0;
+    } else {
+      holdingRegs[REG_REPORT_REMAIN] = (uint16_t)((settings.lastReportDay + settings.reportDays) - today);
     }
   }
 }
@@ -957,6 +1188,23 @@ void applyHoldingRegChanges(const uint16_t oldRegs[NUM_HOLDING_REGS]) {
     if (setRtc(newTime)) {
       checkSchedule();
     }
+  }
+
+  // 6. Kiem tra thay doi cai dat bao cao dinh ky qua Modbus (Reg 32..34)
+  if (holdingRegs[REG_REPORT_DAYS] != oldRegs[REG_REPORT_DAYS] ||
+      holdingRegs[REG_REPORT_HOUR] != oldRegs[REG_REPORT_HOUR] ||
+      holdingRegs[REG_REPORT_MIN]  != oldRegs[REG_REPORT_MIN]) {
+    settings.reportDays = holdingRegs[REG_REPORT_DAYS];
+    if (holdingRegs[REG_REPORT_HOUR] <= 23) {
+      settings.reportHour = (uint8_t)holdingRegs[REG_REPORT_HOUR];
+    }
+    if (holdingRegs[REG_REPORT_MIN] <= 59) {
+      settings.reportMinute = (uint8_t)holdingRegs[REG_REPORT_MIN];
+    }
+    if (rtcValid) {
+      settings.lastReportDay = dateToEpochDays(rtc.year, rtc.month, rtc.day);
+    }
+    saveSettings();
   }
 }
 
@@ -1134,7 +1382,160 @@ void handleDebugSerial() {
   }
 }
 
-// ==================== 12. SETUP & LOOP ====================
+// ==================== 12. XU LY NUT NHAN DIEU KHIEN THU CONG (BT1..BT4) ====================
+// BT1 (PB12): Bam de chuyen doi qua lai giua AUTO va MANUAL (kem hieu ung bao hieu 3 relay):
+//             - Neu chuyen sang AUTO  : 3 relay Bat 1s, Tat 1s (2 lan) roi ve AUTO
+//             - Neu chuyen sang MANUAL: 3 relay Bat 1s, Tat 1s (1 lan) roi ve MANUAL
+// BT2 (PB13): Bat / Tat Relay 1 (neu dang AUTO bat len se tam chuyen MAN, tat ve se tro lai AUTO)
+// BT3 (PB14): Bat / Tat Relay 2 (tuong tu Relay 1)
+// BT4 (PB15): Bat / Tat Relay 3 (MAN doc lap, khong anh huong den che do he thong)
+const uint32_t btnPins[4] = {BUTTON_1, BUTTON_2, BUTTON_3, BUTTON_4};
+int btnLastState[4]       = {HIGH, HIGH, HIGH, HIGH};
+int btnDebouncedState[4]  = {HIGH, HIGH, HIGH, HIGH};
+uint32_t btnDebounceMs[4] = {0, 0, 0, 0};
+
+bool targetModeIsAuto    = false;
+uint32_t lastModeBlinkMs = 0;
+
+// Bat dau hieu ung nhap nhay 3 relay khi bam BT1
+void triggerModeToggle() {
+  if (modeBlinkStep > 0) return; // Dang chay hieu ung thi bo qua
+
+  targetModeIsAuto = !settings.autoMode; // Dao sang che do nguoc lai
+  modeBlinkStep = 1;
+  lastModeBlinkMs = millis();
+
+  // Bat ca 3 relay ngay lap tuc de bat dau 1s dau tien
+  for (int r = 0; r < 3; r++) {
+    setRelay(r, true);
+  }
+
+  DebugSerial.println(targetModeIsAuto ?
+    "[BT1] Chuyen sang AUTO: Bat 1s, Tat 1s (2 lan)..." :
+    "[BT1] Chuyen sang MANUAL: Bat 1s, Tat 1s (1 lan)...");
+}
+
+// May trang thai non-blocking chay hieu ung nhap nhay 3 relay (hoan toan khong lam treo Modbus/SIM)
+void handleModeBlink() {
+  if (modeBlinkStep == 0) return;
+
+  uint32_t now = millis();
+  if (now - lastModeBlinkMs < 1000) return; // Chua du 1 giay thi doi tiep
+  lastModeBlinkMs = now;
+
+  if (targetModeIsAuto) {
+    // Chuyen ve AUTO: Bat 1s (step 1) -> Tat 1s (step 2) -> Bat 1s (step 3) -> Tat 1s (step 4) -> Ve AUTO
+    if (modeBlinkStep == 1) {
+      for (int r = 0; r < 3; r++) setRelay(r, false);
+      modeBlinkStep = 2;
+    } else if (modeBlinkStep == 2) {
+      for (int r = 0; r < 3; r++) setRelay(r, true);
+      modeBlinkStep = 3;
+    } else if (modeBlinkStep == 3) {
+      for (int r = 0; r < 3; r++) setRelay(r, false);
+      modeBlinkStep = 4;
+    } else if (modeBlinkStep == 4) {
+      // Hoan thanh 2 lan: Chinh thuc chuyen sang AUTO
+      settings.autoMode = true;
+      autoOverridden[0] = false;
+      autoOverridden[1] = false;
+      saveSettings();
+      readRtc();
+      checkSchedule();
+      updateHoldingRegsFromSystem();
+      modeBlinkStep = 0;
+      DebugSerial.println("[BT1] Da chuyen sang che do AUTO");
+    }
+  } else {
+    // Chuyen ve MANUAL: Bat 1s (step 1) -> Tat 1s (step 2) -> Ve MANUAL
+    if (modeBlinkStep == 1) {
+      for (int r = 0; r < 3; r++) setRelay(r, false);
+      modeBlinkStep = 2;
+    } else if (modeBlinkStep == 2) {
+      // Hoan thanh 1 lan: Chinh thuc chuyen sang MANUAL
+      settings.autoMode = false;
+      autoOverridden[0] = false;
+      autoOverridden[1] = false;
+      saveSettings();
+      updateHoldingRegsFromSystem();
+      modeBlinkStep = 0;
+      DebugSerial.println("[BT1] Da chuyen sang che do MANUAL");
+    }
+  }
+}
+
+// Xu ly dao trang thai Relay khi bam BT2, BT3, BT4
+void toggleRelayByButton(int relayIdx) {
+  if (modeBlinkStep > 0) return; // Dang chay hieu ung BT1 thi tam khoa
+  if (relayIdx < 0 || relayIdx >= 3) return;
+
+  bool turnOn = !relayOn[relayIdx];
+
+  // Chi Relay 1 & Relay 2 moi ap dung quy tac override AUTO <-> MAN
+  if (relayIdx == 0 || relayIdx == 1) {
+    if (turnOn) {
+      // Set len 1: Neu he thong dang o AUTO -> chuyen sang MAN va danh dau override
+      if (settings.autoMode) {
+        settings.autoMode = false;
+        autoOverridden[relayIdx] = true;
+        saveSettings();
+      }
+    } else {
+      // Set ve 0: Neu relay nay truoc do duoc override tu AUTO -> tra ve AUTO lai
+      if (autoOverridden[relayIdx]) {
+        autoOverridden[relayIdx] = false;
+        if (!autoOverridden[0] && !autoOverridden[1]) {
+          settings.autoMode = true;
+          saveSettings();
+          readRtc();
+          checkSchedule();
+        }
+      }
+    }
+  }
+
+  setRelay(relayIdx, turnOn);
+  updateHoldingRegsFromSystem();
+
+  DebugSerial.print("[BUTTON] BT");
+  DebugSerial.print(relayIdx + 2);
+  DebugSerial.print(" -> Relay ");
+  DebugSerial.print(relayIdx + 1);
+  DebugSerial.println(turnOn ? " ON" : " OFF");
+}
+
+void handleButtons() {
+  // 1. Duy tri may trang thai nhap nhay chuyen mode cua BT1
+  handleModeBlink();
+
+  // 2. Doc va chong doi 4 nut nhan (50 ms)
+  uint32_t now = millis();
+  for (int i = 0; i < 4; i++) {
+    int reading = digitalRead(btnPins[i]);
+
+    if (reading != btnLastState[i]) {
+      btnDebounceMs[i] = now;
+      btnLastState[i]  = reading;
+    }
+
+    if ((now - btnDebounceMs[i]) >= 50) {
+      if (reading != btnDebouncedState[i]) {
+        btnDebouncedState[i] = reading;
+
+        // Nut duoc nhan xuong (canh xuong HIGH -> LOW voi dien tro keo len INPUT_PULLUP)
+        if (btnDebouncedState[i] == LOW) {
+          if (i == 0) {
+            triggerModeToggle();        // BT1
+          } else {
+            toggleRelayByButton(i - 1); // BT2 (Relay 1), BT3 (Relay 2), BT4 (Relay 3)
+          }
+        }
+      }
+    }
+  }
+}
+
+// ==================== 13. SETUP & LOOP ====================
 void setup() {
   // Tat tat ca relay ngay khi cap nguon
   for (int r = 0; r < 3; r++) {
@@ -1145,6 +1546,11 @@ void setup() {
   pinMode(LED_ACT, OUTPUT);
   digitalWrite(LED_ACT, LOW);
   pinMode(SIM_RST, INPUT);
+
+  // Khoi tao 4 nut nhan PB12, PB13, PB14, PB15 (dien tro keo len INPUT_PULLUP)
+  for (int i = 0; i < 4; i++) {
+    pinMode(btnPins[i], INPUT_PULLUP);
+  }
 
   // Khoi tao UART Debug (9600) va UART SIM (115200)
   DebugSerial.setRx(RX1);
@@ -1203,18 +1609,33 @@ void loop() {
   // 4. Nhan lenh tu may tinh qua cong Debug Serial
   handleDebugSerial();
 
-  // 5. Moi 1 giay doc RTC va kiem tra lich hen AUTO
+  // 5. Xu ly 4 nut nhan dieu khien thu cong (BT1..BT4)
+  handleButtons();
+
+  // 6. Moi 1 giay doc RTC, kiem tra lich hen AUTO va kiem tra bao cao dinh ky
   static uint32_t lastRtcMs = 0;
   if (millis() - lastRtcMs >= 1000) {
     lastRtcMs = millis();
     readRtc();
     checkSchedule();
+    checkPeriodicReport();
   }
 
-  // 6. Nhay LED bao hieu he thong dang hoat dong (moi 200ms)
+  // 7. Nhay LED bao hieu he thong dang hoat dong (moi 200ms)
   static uint32_t lastLedMs = 0;
   if (millis() - lastLedMs >= 200) {
     lastLedMs = millis();
     digitalWrite(LED_ACT, !digitalRead(LED_ACT));
+  }
+
+  // 8. Dinh ky luu dien nang E vao EEPROM (moi 1 gio) khi Relay 1 bat 24/24 de phong cup dien
+  static uint32_t lastEnergySaveMs = 0;
+  static double lastSavedEnergyKwh = 0.0;
+  if (millis() - lastEnergySaveMs >= 3600000) { // 1 gio = 3,600,000 ms
+    lastEnergySaveMs = millis();
+    if (fabs(energyKwh - lastSavedEnergyKwh) >= 0.05) {
+      lastSavedEnergyKwh = energyKwh;
+      saveEnergy();
+    }
   }
 }
