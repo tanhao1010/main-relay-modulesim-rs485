@@ -1,0 +1,4 @@
+#lib/
+
+Thư mục này dành riêng cho các thư viện tự viết hoặc thư viện ngoài dùng riêng cho dự án.
+PlatformIO sẽ tự động biên dịch các thư viện nằm trong thư mục này.
